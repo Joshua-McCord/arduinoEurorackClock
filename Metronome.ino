@@ -63,10 +63,11 @@ void sendMidiMessage(uint8_t command, uint8_t byte1, uint8_t byte2)
   //Serial.write(byte2);
   if(command == NOTE_ON){
      digitalWrite(22, HIGH);
-     tone(8, 1000, 1000/32);
+     //tone(8, 1000, 1000/32);
   }
   else if(command == NOTE_OFF) {
     digitalWrite(22, LOW);
+    tone(8, 4978, 1000/32);
   }
 }
 
@@ -165,7 +166,7 @@ void setup()
   uClock.setOnClockStopOutput(onClockStop);
   
   // Set the clock BPM to 126 BPM
-  uClock.setTempo(80);
+  uClock.setTempo(57);
 
   // initing sequencer data
   for ( uint16_t i = 0; i < STEP_MAX_SIZE; i++ ) {
@@ -178,7 +179,7 @@ void setup()
   // initing note stack data
   for ( uint8_t i = 0; i < NOTE_STACK_SIZE; i++ ) {
     _note_stack[i].note = 0;
-    _note_stack[i].length = -1;
+    _note_stack[i].length = 1;
   }
 
   // pins, buttons, leds and pots config
