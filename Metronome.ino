@@ -1,208 +1,204 @@
-#include <LiquidCrystal.h>
-#include "pitches.h"
+// Roland TB303 Step Sequencer engine clone.
+// No interface here, just the engine as example.
+// author: midilab contact@midilab.co
+// Under MIT license
+#include "Arduino.h"
 #include "uClock.h"
 
-//////////////////////////////////////////////
-// Rotary Encoder
-//////////////////////////////////////////////
- // Rotary Encoder Inputs
- #define inputCLK 5
- #define inputDT 4
- 
- // LED Outputs
- #define ledCW 10
- #define ledCCW 9
- 
- int counter = 0; 
- int currentStateCLK;
- int previousStateCLK; 
+// Sequencer config
+#define STEP_MAX_SIZE      16
+#define NOTE_LENGTH        4 // min: 1 max: 5 DO NOT EDIT BEYOND!!!
+#define NOTE_VELOCITY      90
+#define ACCENT_VELOCITY    127
 
- String encdir ="";
+// MIDI config
+#define MIDI_CHANNEL      0 // 0 = channel 1
 
-//////////////////////////////////////////////
-// BPM
-//////////////////////////////////////////////
-//PINS
-const int SPEAKER_PIN = 8;
-const int MASTER_CLOCK_PIN = 22;
-const int MULT_CLOCK_ONE_PIN = 23;
-const int knockSensor = A0;
+// do not edit below!
+#define NOTE_STACK_SIZE    3
 
-const int threshold = 200;
-const boolean ACCENT = true;
+// MIDI clock, start, stop, note on and note off byte definitions - based on MIDI 1.0 Standards.
+#define MIDI_CLOCK 0xF8
+#define MIDI_START 0xFA
+#define MIDI_STOP  0xFC
+#define NOTE_ON    0x90
+#define NOTE_OFF   0x80
 
-int BPM = 1;
-int multOneBPM = 2;
+// Sequencer data
+typedef struct
+{
+  uint8_t note;
+  bool accent;
+  bool glide;
+  bool rest;
+} SEQUENCER_STEP_DATA;
 
-unsigned long masterLast;
-unsigned long masterTDelay;
+typedef struct
+{
+  uint8_t note;
+  int8_t length;
+} STACK_NOTE_DATA;
 
-unsigned long multClockOneLast;
-unsigned long multClockOneTDelay;
+// main sequencer data
+SEQUENCER_STEP_DATA _sequencer[STEP_MAX_SIZE];
+STACK_NOTE_DATA _note_stack[NOTE_STACK_SIZE];
+uint16_t _step_length = STEP_MAX_SIZE;
 
-int signiture = 4;
+// make sure all above sequencer data are modified atomicly only
+// eg. ATOMIC(_sequencer[0].accent = true); ATOMIC(_step_length = 7);
+uint8_t _tmpSREG;
+#define ATOMIC(X) _tmpSREG = SREG; cli(); X; SREG = _tmpSREG;
 
+// shared data to be used for user interface feedback
+bool _playing = false;
+uint16_t _step = 0;
 
-int noteDurationMaster;
-int noteDurationMultOne;
-
-int masterBeat;
-int multClockOneBeat;
-
-
-//////////////////////////////////////////////
-// State Machine
-//////////////////////////////////////////////
-const int MASTER_STATE = 0;
-
-const int MULT_CLOCK_ONE_STATE = 1;
-const int MULT_CLOCK_TWO_STATE = 2;
-const int MULT_CLOCK_THREE_STATE = 3;
-
-const int DIV_CLOCK_ONE_STATE = 1;
-const int DIV_CLOCK_TWO_STATE = 2;
-const int DIV_CLOCK_THREE_STATE = 3;
-
-
-
-void setup() {
-
-  //////////////////////////////////////////////
-  // Rotary Encoder Stuff
-  //////////////////////////////////////////////
-   // Set encoder pins as inputs  
-   pinMode (inputCLK,INPUT);
-   pinMode (inputDT,INPUT);
-   
-   // Set LED pins as outputs
-   pinMode (ledCW,OUTPUT);
-   pinMode (ledCCW,OUTPUT);
-   
-   // Setup Serial Monitor
-   Serial.begin (9600);
-   
-   // Read the initial state of inputCLK
-   // Assign to previousStateCLK variable
-   previousStateCLK = digitalRead(inputCLK);
-
+void sendMidiMessage(uint8_t command, uint8_t byte1, uint8_t byte2)
+{ 
   
-  Serial.begin(9600);
-
-  //////////////////////////////////////////////
-  // BPM Stuff
-  //////////////////////////////////////////////
-  pinMode(MASTER_CLOCK_PIN, OUTPUT);
-  pinMode(SPEAKER_PIN, OUTPUT);
-  pinMode(MULT_CLOCK_ONE_PIN, OUTPUT);
-  //pinMode(BUTTON_PIN, INPUT);
-  
-  
-  masterBeat = 0;
-  multClockOneBeat = 0;
-  
-  BPM = 120;
-  //calculate seconds per beat
-  
-  masterTDelay = 60000/BPM;
-  multClockOneTDelay = 60000/BPM;
-  
-  masterLast = millis();
-  multClockOneLast = millis();
-  
-  // to calculate the note duration, take one second
-  // divided by the note type.
-  //e.g. quarter note = 1000 / 4, eighth note = 1000/8, etc.
-  noteDurationMaster = 1000 / 0.5;
-  noteDurationMultOne = 1000 / 8;
+  // send midi message
+  //command = command | (uint8_t)MIDI_CHANNEL;
+  //Serial.write(command);
+  //Serial.write(byte1);
+  //Serial.write(byte2);
+  if(command == NOTE_ON){
+     digitalWrite(22, HIGH);
+     tone(8, 1000, 1000/32);
+  }
+  else if(command == NOTE_OFF) {
+    digitalWrite(22, LOW);
+  }
 }
 
-void loop() {
-
-   //////////////////////////////////////////////
-   // Rotary Encoder Stuff
-   //////////////////////////////////////////////
-   // Read the current state of inputCLK
-   currentStateCLK = digitalRead(inputCLK);
+// The callback function wich will be called by uClock each Pulse of 16PPQN clock resolution. Each call represents exactly one step.
+void ClockOut16PPQN(uint32_t * tick) 
+{
+  uint16_t step;
+  uint16_t length = NOTE_LENGTH;
   
-   // If the previous and the current state of the inputCLK are different then a pulse has occured
-   if (currentStateCLK != previousStateCLK){ 
-       
-     // If the inputDT state is different than the inputCLK state then 
-     // the encoder is rotating counterclockwise
-     if ((digitalRead(inputDT)) != currentStateCLK) { 
-       counter --;
-       encdir ="CCW";
-       digitalWrite(ledCW, LOW);
-       digitalWrite(ledCCW, HIGH);
-       if(BPM >= 30){
-        BPM -= 5;
-       }
-       Serial.println("BPM: " + String(BPM));
-       Serial.println("MultOne BPM: " + String(multOneBPM));
-       
-     } else {
-       // Encoder is rotating clockwise
-       counter ++;
-       encdir ="CW";
-       digitalWrite(ledCW, HIGH);
-       digitalWrite(ledCCW, LOW);
-       if(BPM <= 300){
-        BPM += 5;
-       }
-       Serial.println("BPM: " + String(BPM));
-       Serial.println("MultOne BPM: " + String(multOneBPM));
-       
-     }
-     Serial.print("Direction: ");
-     Serial.print(encdir);
-     Serial.print(" -- Value: ");
-     Serial.println(counter);
-   } 
-   // Update previousStateCLK with the current state
-   previousStateCLK = currentStateCLK; 
+  // get actual step.
+  _step = *tick % _step_length;
+  
+  // send note on only if this step are not in rest mode
+  if ( _sequencer[_step].rest == false ) {
 
-  //////////////////////////////////////////////
-  // BPM
-  //////////////////////////////////////////////
-  masterClock();
-  multClockOne();
-}
-void masterClock() {
-  int elapsed = millis() - masterLast;
-  if(BPM == 0) { 
-    return;
-  }
-  if(elapsed > noteDurationMultOne) { 
-    digitalWrite(MASTER_CLOCK_PIN, LOW);
-  }
-  masterTDelay = 60000/BPM;
-  if(elapsed < masterTDelay) { 
-    return;
-  }
-  int play_note = NOTE_C4;
-  masterBeat = masterBeat % signiture;
-  if(ACCENT && masterBeat == 0) {
-    play_note = NOTE_C6;
-  }
-  tone(SPEAKER_PIN, play_note, noteDurationMaster);
-  digitalWrite(MASTER_CLOCK_PIN, HIGH);
-  masterLast = millis();
-  masterBeat++;
+    // check for glide event ahead of _step
+    step = _step;
+    for ( uint16_t i = 1; i < _step_length; i++  ) {
+      ++step;
+      step = step % _step_length;
+      if ( _sequencer[step].glide == true && _sequencer[step].rest == false ) {
+        length = NOTE_LENGTH + (i * 6);
+        break;
+      } else if ( _sequencer[step].rest == false ) {
+        break;
+      }
+    }
+
+    // find a free note stack to fit in
+    for ( uint8_t i = 0; i < NOTE_STACK_SIZE; i++ ) {
+      if ( _note_stack[i].length == -1 ) {
+        _note_stack[i].note = _sequencer[_step].note;
+        _note_stack[i].length = length;
+        // send note on
+        sendMidiMessage(NOTE_ON, _sequencer[_step].note, _sequencer[_step].accent ? ACCENT_VELOCITY : NOTE_VELOCITY);    
+        return;
+      }
+    }
+  }  
 }
 
-void multClockOne() {
-  int elapsed = (millis() - multClockOneLast);
-  if((BPM) == 0) { 
-    return;
+// The callback function wich will be called by uClock each Pulse of 96PPQN clock resolution.
+void ClockOut96PPQN(uint32_t * tick) 
+{
+  // Send MIDI_CLOCK to external hardware
+  Serial.write(MIDI_CLOCK);
+
+  // handle note on stack
+  for ( uint8_t i = 0; i < NOTE_STACK_SIZE; i++ ) {
+    if ( _note_stack[i].length != -1 ) {
+      --_note_stack[i].length;
+      if ( _note_stack[i].length == 0 ) {
+        sendMidiMessage(NOTE_OFF, _note_stack[i].note, 0);
+        _note_stack[i].length = -1;
+      }
+    }  
   }
-  if(elapsed > noteDurationMaster) { 
-    digitalWrite(MULT_CLOCK_ONE_PIN, LOW);
+}
+
+// The callback function wich will be called when clock starts by using Clock.start() method.
+void onClockStart() 
+{
+  Serial.write(MIDI_START);
+  _playing = true;
+}
+
+// The callback function wich will be called when clock stops by using Clock.stop() method.
+void onClockStop() 
+{
+  Serial.write(MIDI_STOP);
+  // send all note off on sequencer stop
+  for ( uint8_t i = 0; i < NOTE_STACK_SIZE; i++ ) {
+    sendMidiMessage(NOTE_OFF, _note_stack[i].note, 0);
+    _note_stack[i].length = -1;
   }
-  multClockOneTDelay = (60000/BPM);
-  if(elapsed < multClockOneTDelay) { 
-    return;
+  _playing = false;
+}
+
+void setup() 
+{
+  // Initialize serial communication
+  // the default MIDI serial speed communication at 31250 bits per second
+  Serial.begin(31250); 
+
+  // Inits the clock
+  uClock.init();
+  
+  // Set the callback function for the clock output to send MIDI Sync message.
+  uClock.setClock96PPQNOutput(ClockOut96PPQN);
+  
+  // Set the callback function for the step sequencer on 16ppqn
+  uClock.setClock16PPQNOutput(ClockOut16PPQN);  
+  
+  // Set the callback function for MIDI Start and Stop messages.
+  uClock.setOnClockStartOutput(onClockStart);  
+  uClock.setOnClockStopOutput(onClockStop);
+  
+  // Set the clock BPM to 126 BPM
+  uClock.setTempo(80);
+
+  // initing sequencer data
+  for ( uint16_t i = 0; i < STEP_MAX_SIZE; i++ ) {
+    _sequencer[i].note = 48;
+    _sequencer[i].accent = false;
+    _sequencer[i].glide = false;
+    _sequencer[i].rest = false;
   }
-  digitalWrite(MULT_CLOCK_ONE_PIN, HIGH);
-  multClockOneLast = millis();
-  masterBeat++;
+
+  // initing note stack data
+  for ( uint8_t i = 0; i < NOTE_STACK_SIZE; i++ ) {
+    _note_stack[i].note = 0;
+    _note_stack[i].length = -1;
+  }
+
+  // pins, buttons, leds and pots config
+  //configureYourUserInterface();
+
+  pinMode (22,OUTPUT);
+  
+  // start sequencer
+  uClock.start();
+
+}
+
+// User interaction goes here
+void loop() 
+{
+  // Controls your 303 engine interacting with user here...
+  // you can change data by using _sequencer[] and _step_length only! do not mess with _note_stack[]!
+  // IMPORTANT!!! Sequencer main data are used inside a interrupt enabled by uClock for BPM clock timing. Make sure all sequencer data are modified atomicly using this macro ATOMIC();
+  // eg. ATOMIC(_sequencer[0].accent = true); ATOMIC(_step_length = 7);
+  //processYourButtons();
+  //processYourLeds();
+  //processYourPots();
 }
