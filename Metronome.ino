@@ -37,7 +37,10 @@ int aLastState;
 
 #define PROPER_BPM_RES  24
 
+
+//Tempo and Clock Mults/Divs
 int masterTempo = 80;
+int clockOneCalculation = 1;
 
 int ppqnCount;
 
@@ -62,7 +65,7 @@ void ClockOut96PPQN(uint32_t * tick)
   } else {
     digitalWrite(22, LOW);
   }
-  if(ppqnCount % (PROPER_BPM_RES*3) == 0) {
+  if(ppqnCount % (PROPER_BPM_RES*clockOneCalculation) == 0) {
       digitalWrite(23, HIGH);
   } else {
     digitalWrite(23, LOW);
@@ -129,16 +132,15 @@ void loop()
 
   //ChannelOneButtonState
   channelOneButtonState = digitalRead(CHANNEL_ONE_BUTTON_PIN);
-  if(channelOneButtonState != lastChannelOneButtonState) {
-    if(channelOneButtonState == HIGH) {
+  if(lastChannelOneButtonState == HIGH && channelOneButtonState == LOW) {
+    if(currentState == MASTER_STATE) {
       currentState = CHANNEL_ONE_STATE;
-      Serial.write("Channel 1");
       lcd.clear();
     } else {
       currentState = MASTER_STATE;
       lcd.clear();
-      Serial.write("master state");
     }
+    delay(50);
   }
   lastChannelOneButtonState = channelOneButtonState;
 
@@ -148,9 +150,31 @@ void loop()
   if (aState != aLastState){     
      // If the outputB state is different to the outputA state, that means the encoder is rotating clockwise
      if (digitalRead(outputB) != aState) { 
-       masterTempo ++;
+      switch(currentState) {
+        case MASTER_STATE :
+          if(masterTempo <= 150){
+            masterTempo ++;
+          }
+          break;
+         case CHANNEL_ONE_STATE : 
+          if(clockOneCalculation <= 16) {
+            clockOneCalculation++;
+          }
+          break;
+      }
      } else {
-       masterTempo --;
+       switch(currentState) {
+        case MASTER_STATE :
+          if(masterTempo >= 20){
+            masterTempo--;
+          }
+          break;
+         case CHANNEL_ONE_STATE : 
+          if(clockOneCalculation >= 1) {
+            clockOneCalculation--;
+          }
+          break;
+      }
      }
      lcd.clear();
    } 
@@ -170,7 +194,7 @@ void updateLCD() {
   if(currentState == MASTER_STATE) {
     lcd.print("Tempo: " + String(masterTempo));
   } else if(currentState == CHANNEL_ONE_STATE) {
-    lcd.print("channel1");
+    lcd.print("ClockOneMult: " + String(clockOneCalculation));
   }
   
 }
